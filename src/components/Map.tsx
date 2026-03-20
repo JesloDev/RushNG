@@ -1,10 +1,41 @@
-import { APIProvider, Map, AdvancedMarker, Pin } from '@vis.gl/react-google-maps';
-import { motion } from 'motion/react';
+import { MapContainer, TileLayer, Marker, Popup, useMapEvents, useMap } from 'react-leaflet';
+import L from 'leaflet';
+import { useEffect } from 'react';
 
-const API_KEY = process.env.GOOGLE_MAPS_PLATFORM_KEY || '';
-const hasValidKey = Boolean(API_KEY) && API_KEY !== 'MY_GOOGLE_MAPS_KEY';
+// Fix for default marker icons in Leaflet with Vite
+// @ts-ignore
+delete L.Icon.Default.prototype._getIconUrl;
+L.Icon.Default.mergeOptions({
+  iconRetinaUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png',
+  iconUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
+  shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
+});
 
-export default function GoogleMap({ 
+function MapEvents({ onMapClick, center, zoom }: { onMapClick?: (e: any) => void, center?: { lat: number, lng: number }, zoom?: number }) {
+  const map = useMap();
+
+  useEffect(() => {
+    if (center) {
+      map.setView([center.lat, center.lng], zoom || map.getZoom(), { animate: true });
+    }
+  }, [center, zoom, map]);
+
+  useMapEvents({
+    click: (e) => {
+      onMapClick?.({
+        detail: {
+          latLng: {
+            lat: e.latlng.lat,
+            lng: e.latlng.lng
+          }
+        }
+      });
+    },
+  });
+  return null;
+}
+
+export default function LeafletMap({ 
   center = { lat: 6.5244, lng: 3.3792 }, // Lagos
   zoom = 12,
   markers = [],
@@ -17,56 +48,31 @@ export default function GoogleMap({
   onMapClick?: (e: any) => void;
   onMarkerClick?: (markerId: string) => void;
 }) {
-  if (!hasValidKey) {
-    return (
-      <div className="flex h-full w-full items-center justify-center bg-midnight p-8 font-sans text-cream">
-        <motion.div 
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="max-w-md text-center"
-        >
-          <h2 className="font-display text-2xl font-extrabold text-rush-orange">Google Maps API Key Required</h2>
-          <p className="mt-4 text-sm text-white/60 leading-relaxed">
-            <strong>Step 1:</strong> <a href="https://console.cloud.google.com/google/maps-apis/credentials" target="_blank" rel="noopener" className="text-rush-orange underline">Get an API Key</a>
-          </p>
-          <p className="mt-4 text-sm text-white/60 leading-relaxed">
-            <strong>Step 2:</strong> Add your key as a secret in AI Studio:
-          </p>
-          <ul className="mt-4 space-y-2 text-left text-xs text-white/40">
-            <li>• Open <strong>Settings</strong> (⚙️ gear icon, top-right corner)</li>
-            <li>• Select <strong>Secrets</strong></li>
-            <li>• Type <code>GOOGLE_MAPS_PLATFORM_KEY</code> as the secret name</li>
-            <li>• Paste your API key as the value and press <strong>Enter</strong></li>
-          </ul>
-          <p className="mt-6 text-xs text-white/20 italic">The app rebuilds automatically after you add the secret.</p>
-        </motion.div>
-      </div>
-    );
-  }
-
   return (
-    <APIProvider apiKey={API_KEY} version="weekly">
-      <Map
-        defaultCenter={center}
-        defaultZoom={zoom}
-        mapId="RUSH_NG_MAP"
-        internalUsageAttributionIds={['gmp_mcp_codeassist_v1_aistudio']}
+    <div style={{ width: '100%', height: '100%', background: '#0A0A0A' }}>
+      <MapContainer 
+        center={[center.lat, center.lng]} 
+        zoom={zoom} 
         style={{ width: '100%', height: '100%' }}
-        onClick={(e) => onMapClick?.(e)}
-        gestureHandling={'greedy'}
-        disableDefaultUI={true}
+        zoomControl={false}
       >
+        <TileLayer
+          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
+          url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
+        />
+        <MapEvents onMapClick={onMapClick} center={center} zoom={zoom} />
         {markers.map((m) => (
-          <AdvancedMarker 
+          <Marker 
             key={m.id} 
-            position={m.position} 
-            title={m.title}
-            onClick={() => onMarkerClick?.(m.id)}
+            position={[m.position.lat, m.position.lng]}
+            eventHandlers={{
+              click: () => onMarkerClick?.(m.id),
+            }}
           >
-            <Pin background={m.color || "#FF5C1A"} glyphColor="#0A0A0A" />
-          </AdvancedMarker>
+            {m.title && <Popup>{m.title}</Popup>}
+          </Marker>
         ))}
-      </Map>
-    </APIProvider>
+      </MapContainer>
+    </div>
   );
 }

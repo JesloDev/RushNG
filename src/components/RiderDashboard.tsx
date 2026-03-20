@@ -3,13 +3,15 @@ import { supabase } from '../supabase';
 import { motion, AnimatePresence } from 'motion/react';
 import { GoogleGenAI } from "@google/genai";
 import { MapPin, Check, Navigation, Package, Bike, Map as MapIcon, List, Volume2 } from 'lucide-react';
-import GoogleMap from './Map';
+import LeafletMap from './Map';
 
 export default function RiderDashboard({ user }: { user: any }) {
   const [orders, setOrders] = useState<any[]>([]);
   const [activeOrder, setActiveOrder] = useState<any | null>(null);
   const [view, setView] = useState<'list' | 'map'>('list');
   const [verifying, setVerifying] = useState(false);
+  const [verificationSuccess, setVerificationSuccess] = useState(false);
+  const [error, setError] = useState('');
   const [isPidgin, setIsPidgin] = useState(false);
 
   const t = (en: string, pid: string) => isPidgin ? pid : en;
@@ -30,9 +32,12 @@ export default function RiderDashboard({ user }: { user: any }) {
         },
       });
 
-      const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+      const part = response.candidates?.[0]?.content?.parts?.[0];
+      const base64Audio = part?.inlineData?.data;
+      const mimeType = part?.inlineData?.mimeType || 'audio/wav';
+      
       if (base64Audio) {
-        const audio = new Audio(`data:audio/mp3;base64,${base64Audio}`);
+        const audio = new Audio(`data:${mimeType};base64,${base64Audio}`);
         audio.play();
       }
     } catch (err) {
@@ -46,7 +51,7 @@ export default function RiderDashboard({ user }: { user: any }) {
         .from('orders')
         .select('*')
         .eq('status', 'pending')
-        .order('createdAt', { ascending: false });
+        .order('created_at', { ascending: false });
       
       if (data) setOrders(data);
       if (error) console.error('Fetch pending error:', error);
@@ -108,30 +113,32 @@ export default function RiderDashboard({ user }: { user: any }) {
 
   const acceptOrder = async (id: string) => {
     try {
-      const { error } = await supabase
+      const { error: updateError } = await supabase
         .from('orders')
         .update({
-          riderId: user.id,
+          rider_id: user.id,
           status: 'accepted',
         })
         .eq('id', id);
       
-      if (error) throw error;
-    } catch (error) {
-      console.error('Accept error:', error);
+      if (updateError) throw updateError;
+    } catch (err: any) {
+      console.error('Accept error:', err);
+      setError(err.message || 'Failed to accept order. Try again.');
     }
   };
 
   const updateStatus = async (id: string, newStatus: string) => {
     try {
-      const { error } = await supabase
+      const { error: updateError } = await supabase
         .from('orders')
         .update({ status: newStatus })
         .eq('id', id);
       
-      if (error) throw error;
-    } catch (error) {
-      console.error('Update status error:', error);
+      if (updateError) throw updateError;
+    } catch (err: any) {
+      console.error('Update status error:', err);
+      setError(err.message || 'Failed to update status. Try again.');
     }
   };
 
@@ -146,13 +153,14 @@ export default function RiderDashboard({ user }: { user: any }) {
           .eq('id', user.id);
         
         if (error) throw error;
-        alert('Account verified successfully! 🚀');
+        setVerificationSuccess(true);
       } catch (error) {
         console.error('Verification error:', error);
+        setError('Verification failed. Try again later.');
       } finally {
         setVerifying(false);
       }
-    }, 2000);
+    }, 1000);
   };
 
   return (
@@ -210,6 +218,34 @@ export default function RiderDashboard({ user }: { user: any }) {
       </div>
 
       <div className="flex-1 overflow-hidden relative">
+        {error && (
+          <motion.div 
+            initial={{ opacity: 0, y: -10 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="absolute top-4 left-6 right-6 z-50 rounded-xl border border-red-500/20 bg-red-500/10 p-4"
+          >
+            <div className="flex items-center justify-between">
+              <p className="text-xs font-bold text-red-500 uppercase tracking-widest">{error}</p>
+              <button onClick={() => setError('')} className="text-red-500 hover:text-red-400">
+                <Check className="h-4 w-4" />
+              </button>
+            </div>
+          </motion.div>
+        )}
+        {verificationSuccess && (
+          <motion.div 
+            initial={{ opacity: 0, y: -10 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="absolute top-4 left-6 right-6 z-50 rounded-xl border border-green-500/20 bg-green-500/10 p-4"
+          >
+            <div className="flex items-center justify-between">
+              <p className="text-xs font-bold text-green-500 uppercase tracking-widest">Account verified successfully! 🚀</p>
+              <button onClick={() => setVerificationSuccess(false)} className="text-green-500 hover:text-green-400">
+                <Check className="h-4 w-4" />
+              </button>
+            </div>
+          </motion.div>
+        )}
         <AnimatePresence mode="wait">
           {view === 'list' ? (
             <motion.div
@@ -347,7 +383,7 @@ export default function RiderDashboard({ user }: { user: any }) {
               exit={{ opacity: 0 }}
               className="h-full"
             >
-              <GoogleMap 
+              <LeafletMap 
                 markers={orders.map(o => ({
                   id: o.id,
                   position: o.pickup,

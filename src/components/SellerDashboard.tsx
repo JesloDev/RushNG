@@ -2,15 +2,16 @@ import { useState, useEffect, useMemo, useCallback } from 'react';
 import { supabase } from '../supabase';
 import { motion, AnimatePresence } from 'motion/react';
 import { GoogleGenAI } from "@google/genai";
-import { useMapsLibrary } from '@vis.gl/react-google-maps';
-import { MapPin, Phone, Check, Trash2, Clock, Package, Navigation, TrendingUp, BarChart2, Volume2 } from 'lucide-react';
+import { MapPin, Phone, Check, Trash2, Clock, Package, Navigation, TrendingUp, BarChart2, Volume2, Search } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell } from 'recharts';
-import GoogleMap from './Map';
+import LeafletMap from './Map';
+import LocationSearch from './LocationSearch';
 
 export default function SellerDashboard({ user }: { user: any }) {
   const [step, setStep] = useState(1);
   const [pickup, setPickup] = useState<{ lat: number, lng: number, address: string } | null>(null);
   const [dropoff, setDropoff] = useState<{ lat: number, lng: number, address: string } | null>(null);
+  const [mapCenter, setMapCenter] = useState<{ lat: number, lng: number }>({ lat: 6.5244, lng: 3.3792 });
   const [customerPhone, setCustomerPhone] = useState('');
   const [paymentMethod, setPaymentMethod] = useState<'cash' | 'transfer'>('cash');
   const [orders, setOrders] = useState<any[]>([]);
@@ -19,12 +20,15 @@ export default function SellerDashboard({ user }: { user: any }) {
   const [calculatedFare, setCalculatedFare] = useState<number | null>(null);
   const [distance, setDistance] = useState<string | null>(null);
   const [isPidgin, setIsPidgin] = useState(false);
-
-  const routesLib = useMapsLibrary('routes');
+  const [error, setError] = useState<string | null>(null);
 
   const t = (en: string, pid: string) => isPidgin ? pid : en;
 
   const speak = async (text: string) => {
+    if (!process.env.GEMINI_API_KEY) {
+      console.warn('GEMINI_API_KEY missing, TTS disabled');
+      return;
+    }
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
       const response = await ai.models.generateContent({
@@ -40,9 +44,12 @@ export default function SellerDashboard({ user }: { user: any }) {
         },
       });
 
-      const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+      const part = response.candidates?.[0]?.content?.parts?.[0];
+      const base64Audio = part?.inlineData?.data;
+      const mimeType = part?.inlineData?.mimeType || 'audio/wav';
+      
       if (base64Audio) {
-        const audio = new Audio(`data:audio/mp3;base64,${base64Audio}`);
+        const audio = new Audio(`data:${mimeType};base64,${base64Audio}`);
         audio.play();
       }
     } catch (err) {
@@ -51,19 +58,18 @@ export default function SellerDashboard({ user }: { user: any }) {
   };
 
   useEffect(() => {
-    if (!pickup || !dropoff || !routesLib) return;
+    if (!pickup || !dropoff) return;
 
     const calculateFee = async () => {
       try {
-        const { routes } = await (routesLib as any).Route.computeRoutes({
-          origin: { lat: pickup.lat, lng: pickup.lng },
-          destination: { lat: dropoff.lat, lng: dropoff.lng },
-          travelMode: 'DRIVING',
-          fields: ['distanceMeters', 'durationMillis'],
-        });
+        // Using OSRM public API for free routing
+        const response = await fetch(
+          `https://router.project-osrm.org/route/v1/driving/${pickup.lng},${pickup.lat};${dropoff.lng},${dropoff.lat}?overview=false`
+        );
+        const data = await response.json();
 
-        if (routes?.[0]) {
-          const distKm = routes[0].distanceMeters / 1000;
+        if (data.routes?.[0]) {
+          const distKm = data.routes[0].distance / 1000;
           const baseFare = 500; // Base price for Lagos traffic
           const perKmRate = 150;
           const totalFare = Math.ceil(baseFare + (distKm * perKmRate));
@@ -73,11 +79,19 @@ export default function SellerDashboard({ user }: { user: any }) {
         }
       } catch (err) {
         console.error('Fee calculation error:', err);
+        // Fallback to straight line distance if API fails
+        const dist = Math.sqrt(
+          Math.pow(pickup.lat - dropoff.lat, 2) + 
+          Math.pow(pickup.lng - dropoff.lng, 2)
+        ) * 111; // rough km conversion
+        const totalFare = Math.ceil(500 + (dist * 150));
+        setCalculatedFare(totalFare);
+        setDistance(`${dist.toFixed(1)} km`);
       }
     };
 
     calculateFee();
-  }, [pickup, dropoff, routesLib]);
+  }, [pickup, dropoff]);
   const analyticsData = useMemo(() => {
     const delivered = orders.filter(o => o.status === 'delivered');
     const grouped = delivered.reduce((acc: any, o) => {
@@ -154,8 +168,9 @@ export default function SellerDashboard({ user }: { user: any }) {
       setPaymentMethod('cash');
       setCalculatedFare(null);
       setDistance(null);
-    } catch (error) {
+    } catch (error: any) {
       console.error('Order error:', error);
+      setError(error.message || 'Failed to place order. Try again.');
     } finally {
       setLoading(false);
     }
@@ -163,10 +178,11 @@ export default function SellerDashboard({ user }: { user: any }) {
 
   const cancelOrder = async (id: string) => {
     try {
-      const { error } = await supabase.from('orders').delete().eq('id', id);
-      if (error) throw error;
-    } catch (error) {
-      console.error('Cancel error:', error);
+      const { error: deleteError } = await supabase.from('orders').delete().eq('id', id);
+      if (deleteError) throw deleteError;
+    } catch (err: any) {
+      console.error('Cancel error:', err);
+      setError(err.message || 'Failed to cancel order. Try again.');
     }
   };
 
@@ -220,6 +236,20 @@ export default function SellerDashboard({ user }: { user: any }) {
         </div>
 
         <div className="flex-1 overflow-y-auto p-6">
+          {error && (
+            <motion.div 
+              initial={{ opacity: 0, y: -10 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="mb-6 rounded-xl border border-red-500/20 bg-red-500/10 p-4"
+            >
+              <div className="flex items-center justify-between">
+                <p className="text-xs font-bold text-red-500 uppercase tracking-widest">{error}</p>
+                <button onClick={() => setError(null)} className="text-red-500 hover:text-red-400">
+                  <Check className="h-4 w-4" />
+                </button>
+              </div>
+            </motion.div>
+          )}
           <AnimatePresence mode="wait">
             {activeTab === 'new' && (
               <motion.div
@@ -259,21 +289,33 @@ export default function SellerDashboard({ user }: { user: any }) {
                     <div className="flex items-center justify-between">
                       <h3 className="font-display text-2xl font-bold text-cream">{t('Where are you?', 'Where we go pick am?')}</h3>
                       <button 
-                        onClick={() => speak(t('Please tap the map to set your pickup location.', 'Abeg touch the map for where we go pick the load.'))}
+                        onClick={() => speak(t('Please type your address or tap the map to set your pickup location.', 'Abeg type your address or touch the map for where we go pick the load.'))}
                         className="rounded-full p-2 text-rush-orange hover:bg-rush-orange/10"
                       >
                         <Volume2 className="h-4 w-4" />
                       </button>
                     </div>
-                    <p className="text-sm text-white/40">{t('Tap the map to set your pickup location or use your current shop address.', 'Touch the map for where we go pick the load.')}</p>
+                    <p className="text-sm text-white/40">{t('Type your address for suggestions or tap the map to set your pickup location.', 'Type your address or touch the map for where we go pick the load.')}</p>
+                    
+                    <LocationSearch 
+                      placeholder={t('Search pickup address...', 'Search for where we go pick am...')}
+                      onSelect={(loc) => {
+                        setPickup(loc);
+                        setMapCenter({ lat: loc.lat, lng: loc.lng });
+                      }}
+                    />
+
                     <div className="rounded-xl border border-carbon bg-white/5 p-4">
                       {pickup ? (
                         <div className="flex items-center gap-3 text-cream">
                           <Check className="h-5 w-5 text-rush-orange" />
-                          <span className="text-sm font-medium">Location set!</span>
+                          <div className="flex flex-col">
+                            <span className="text-sm font-medium">Pickup set!</span>
+                            <span className="text-[10px] text-white/40 line-clamp-1">{pickup.address}</span>
+                          </div>
                         </div>
                       ) : (
-                        <span className="text-sm italic text-white/20">Waiting for map pin...</span>
+                        <span className="text-sm italic text-white/20">Waiting for map pin or search...</span>
                       )}
                     </div>
                     <button
@@ -318,14 +360,26 @@ export default function SellerDashboard({ user }: { user: any }) {
                           className="w-full rounded-xl border border-carbon bg-white/5 py-4 pr-4 pl-12 text-sm text-cream placeholder:text-white/20 focus:border-rush-orange focus:outline-none"
                         />
                       </div>
+
+                      <LocationSearch 
+                        placeholder={t('Search drop-off address...', 'Search for where the load dey go...')}
+                        onSelect={(loc) => {
+                          setDropoff(loc);
+                          setMapCenter({ lat: loc.lat, lng: loc.lng });
+                        }}
+                      />
+
                       <div className="rounded-xl border border-carbon bg-white/5 p-4">
                         {dropoff ? (
                           <div className="flex items-center gap-3 text-cream">
                             <Check className="h-5 w-5 text-rush-orange" />
-                            <span className="text-sm font-medium">Drop-off set!</span>
+                            <div className="flex flex-col">
+                              <span className="text-sm font-medium">Drop-off set!</span>
+                              <span className="text-[10px] text-white/40 line-clamp-1">{dropoff.address}</span>
+                            </div>
                           </div>
                         ) : (
-                          <span className="text-sm italic text-white/20">Waiting for map pin...</span>
+                          <span className="text-sm italic text-white/20">Waiting for map pin or search...</span>
                         )}
                       </div>
                     </div>
@@ -557,7 +611,8 @@ export default function SellerDashboard({ user }: { user: any }) {
 
       {/* Map View */}
       <div className="relative flex-1 bg-carbon">
-        <GoogleMap 
+        <LeafletMap 
+          center={mapCenter}
           onMapClick={handleMapClick}
           markers={[
             ...(pickup ? [{ id: 'pickup', position: { lat: pickup.lat, lng: pickup.lng }, title: 'Pickup', color: '#FF5C1A' }] : []),
