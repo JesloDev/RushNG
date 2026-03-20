@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { supabase } from '../supabase';
 import { motion, AnimatePresence } from 'motion/react';
-import { ArrowUpRight, Phone, Check, ArrowRight, ShieldCheck } from 'lucide-react';
+import { Bike, ArrowUpRight, Phone, Check, ArrowRight, ShieldCheck } from 'lucide-react';
 
 export default function Auth({ onAuthSuccess }: { onAuthSuccess: (user: any) => void }) {
   const [loading, setLoading] = useState(false);

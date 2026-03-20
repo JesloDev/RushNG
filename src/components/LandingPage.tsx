@@ -1,5 +1,5 @@
 import { motion } from 'motion/react';
-import { Bike, ShoppingBag, ShieldCheck, MapPin, Volume2, ArrowRight } from 'lucide-react';
+import { ArrowUpRight, Bike, ShoppingBag, ShieldCheck, MapPin, Volume2, ArrowRight } from 'lucide-react';
 
 interface LandingPageProps {
   onGetStarted: () => void;
@@ -21,10 +21,10 @@ export default function LandingPage({ onGetStarted }: LandingPageProps) {
           className="z-10"
         >
           <div className="mb-6 flex items-center justify-center gap-3">
-            <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-rush-orange font-display text-2xl font-black text-midnight shadow-[0_0_30px_rgba(255,92,26,0.3)]">
-              R
+            <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-rush-orange font-display text-3xl font-black text-midnight shadow-[0_0_40px_rgba(255,92,26,0.3)] tracking-tighter">
+              R<ArrowUpRight className="h-6 w-6 -ml-1" />
             </div>
-            <span className="font-display text-4xl font-bold tracking-tight text-cream">RushNG</span>
+            <span className="font-display text-4xl font-black tracking-tight text-cream">RushNG</span>
           </div>
           
           <h1 className="max-w-4xl font-display text-5xl font-black leading-[1.1] tracking-tight md:text-8xl">
