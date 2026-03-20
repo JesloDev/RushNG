@@ -1,0 +1,5 @@
+{
+  "name": "RushNG",
+  "description": "Lagos delivery platform connecting SMEs to verified riders for same-day delivery.",
+  "requestFramePermissions": ["geolocation"]
+}
