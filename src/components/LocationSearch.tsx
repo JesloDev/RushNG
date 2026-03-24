@@ -45,15 +45,27 @@ export default function LocationSearch({ placeholder, onSelect, className = '' }
 
   const fetchSuggestions = async () => {
     setLoading(true);
+    const timeoutId = setTimeout(() => {
+      setLoading(false);
+      setShowDropdown(false);
+    }, 10000);
+
     try {
       // Nominatim API for open-source geocoding
       const response = await fetch(
-        `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&countrycodes=ng&limit=5`
+        `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&countrycodes=ng&limit=5`,
+        {
+          headers: {
+            'User-Agent': 'RushNG-App/1.0'
+          }
+        }
       );
       const data = await response.json();
+      clearTimeout(timeoutId);
       setSuggestions(data);
       setShowDropdown(true);
     } catch (error) {
+      clearTimeout(timeoutId);
       console.error('Geocoding error:', error);
     } finally {
       setLoading(false);
@@ -89,7 +101,7 @@ export default function LocationSearch({ placeholder, onSelect, className = '' }
       {showDropdown && suggestions.length > 0 && (
         <div 
           ref={dropdownRef}
-          className="absolute z-50 mt-2 w-full overflow-hidden rounded-xl border border-carbon bg-midnight shadow-2xl backdrop-blur-xl"
+          className="absolute z-[1000] mt-2 w-full overflow-hidden rounded-xl border border-carbon bg-midnight shadow-2xl backdrop-blur-xl"
         >
           {suggestions.map((suggestion) => (
             <button

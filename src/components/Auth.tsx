@@ -1,16 +1,20 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { supabase } from '../supabase';
+import { logActivity } from '../services/logger';
 import { motion, AnimatePresence } from 'motion/react';
-import { Bike, ArrowUpRight, Phone, Check, ArrowRight, ShieldCheck } from 'lucide-react';
+import { Bike, ArrowUpRight, Phone, Check, ArrowRight, ShieldCheck, User as UserIcon } from 'lucide-react';
 
-export default function Auth({ onAuthSuccess }: { onAuthSuccess: (user: any) => void }) {
+export default function Auth({ onAuthSuccess, onLogoClick }: { onAuthSuccess: (user: any) => void, onLogoClick: () => void }) {
   const [loading, setLoading] = useState(false);
-  const [role, setRole] = useState<'seller' | 'rider'>('seller');
+  const [role, setRole] = useState<'seller' | 'rider' | 'buyer'>('buyer');
+  const [fullName, setFullName] = useState('');
   const [phoneNumber, setPhoneNumber] = useState('');
   const [verificationCode, setVerificationCode] = useState('');
   const [otpSent, setOtpSent] = useState(false);
   const [verifyingOPay, setVerifyingOPay] = useState(false);
+  const [needsProfile, setNeedsProfile] = useState(false);
   const [error, setError] = useState('');
+  const [tempUser, setTempUser] = useState<any>(null);
 
   const formatPhoneNumber = (number: string) => {
     // Supabase requires E.164 format
@@ -19,9 +23,32 @@ export default function Auth({ onAuthSuccess }: { onAuthSuccess: (user: any) => 
     return number;
   };
 
+  useEffect(() => {
+    const checkExistingSession = async () => {
+      if (!supabase) return;
+      const { data: { session } } = await supabase.auth.getSession();
+      if (session?.user) {
+        setLoading(true);
+        const { data: userData } = await supabase
+          .from('users')
+          .select('*')
+          .eq('id', session.user.id)
+          .maybeSingle();
+        
+        if (!userData) {
+          setTempUser(session.user);
+          setNeedsProfile(true);
+          setOtpSent(true); // To show the back button correctly if needed
+        }
+        setLoading(false);
+      }
+    };
+    checkExistingSession();
+  }, [supabase]);
+
   const handleSendOtp = async () => {
     if (!supabase) return setError('Supabase not configured. Please add VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY to Secrets.');
-    if (!phoneNumber) return setError('Enter your number first!');
+    if (!phoneNumber) return setError('Enter your WhatsApp number first!');
     setLoading(true);
     setError('');
     try {
@@ -31,9 +58,11 @@ export default function Auth({ onAuthSuccess }: { onAuthSuccess: (user: any) => 
       });
       if (error) throw error;
       setOtpSent(true);
+      await logActivity('otp_sent', { phone: formattedNumber, role });
     } catch (err: any) {
       console.error('OTP Send Error:', err);
-      setError(err.message || 'Failed to send OTP. Check your number.');
+      setError(err.message || 'Failed to send code. Check your number.');
+      await logActivity('otp_send_failed', { phone: phoneNumber, error: err.message });
     } finally {
       setLoading(false);
     }
@@ -44,6 +73,14 @@ export default function Auth({ onAuthSuccess }: { onAuthSuccess: (user: any) => 
     if (!verificationCode) return;
     setLoading(true);
     setError('');
+    
+    // Safety timeout to prevent indefinite loading
+    const safetyTimeout = setTimeout(() => {
+      setLoading(false);
+      setVerifyingOPay(false);
+      setError('Verification timed out. Please try again.');
+    }, 15000);
+
     try {
       const formattedNumber = formatPhoneNumber(phoneNumber);
       
@@ -54,7 +91,10 @@ export default function Auth({ onAuthSuccess }: { onAuthSuccess: (user: any) => 
         console.log('Using Magic Code bypass...');
         // We still try to get a session if possible, but if not we mock it
         const { data: { session } } = await supabase.auth.getSession();
-        sessionUser = session?.user || { id: 'demo-user-' + Date.now(), phone: formattedNumber };
+        // Use a deterministic ID for mock users based on phone number to test registration persistence
+        const mockId = 'demo-' + btoa(formattedNumber).replace(/=/g, '');
+        sessionUser = session?.user || { id: mockId, phone: formattedNumber };
+        await logActivity('otp_bypass_used', { phone: formattedNumber, role });
       } else {
         const { data: { session }, error } = await supabase.auth.verifyOtp({
           phone: formattedNumber,
@@ -65,95 +105,87 @@ export default function Auth({ onAuthSuccess }: { onAuthSuccess: (user: any) => 
         if (error) throw error;
         if (!session?.user) throw new Error('No user session found');
         sessionUser = session.user;
+        await logActivity('otp_verified', { phone: formattedNumber, role }, sessionUser.id);
       }
 
       const user = sessionUser;
+      setTempUser(user);
 
-      // After OTP, we check for OPay
-      setVerifyingOPay(true);
+      // Check if user profile exists in our custom table
+      const { data: userData, error: fetchError } = await supabase
+        .from('users')
+        .select('*')
+        .eq('id', user.id)
+        .maybeSingle();
       
-      try {
-        const isOPayUser = !user.phone?.endsWith('00');
-        
-        if (isOPayUser) {
-          // Check if user profile exists in our custom table
-          const { data: userData, error: fetchError } = await supabase
-            .from('users')
-            .select('*')
-            .eq('id', user.id)
-            .maybeSingle();
-          
-          // Simulate fetching OPay Profile Data
-          const opayProfile = {
-            fullName: 'Olawale ' + (role === 'seller' ? 'Bakare' : 'Chukwuma'),
-            accountLevel: 'Tier 3',
-            kycVerified: true,
-            opayAccountNumber: user.phone?.replace('+', ''),
-          };
-
-          if (!userData) {
-            const newUserData = {
-              id: user.id,
-              name: opayProfile.fullName,
-              phone: user.phone || phoneNumber,
-              role: role,
-              status: 'online',
-              is_verified: false,
-              has_opay: true,
-              opay_data: opayProfile,
-              created_at: new Date().toISOString(),
-            };
-            
-            const { data: insertedData, error: insertError } = await supabase
-              .from('users')
-              .insert([newUserData])
-              .select()
-              .maybeSingle();
-            
-            // If table doesn't exist or insert fails, fallback to local state to let user in
-            if (insertError) {
-              console.warn('Database insert failed, proceeding with local state:', insertError);
-              onAuthSuccess(newUserData);
-            } else {
-              onAuthSuccess(insertedData || newUserData);
-            }
-          } else {
-            // Update existing user
-            const { data: updatedData, error: updateError } = await supabase
-              .from('users')
-              .update({ opay_data: opayProfile, name: opayProfile.fullName })
-              .eq('id', user.id)
-              .select()
-              .maybeSingle();
-            
-          if (updateError) {
-              console.warn('Database update failed, proceeding with local state:', updateError);
-              onAuthSuccess(userData);
-            } else {
-              onAuthSuccess(updatedData || userData);
-            }
-          }
-        } else {
-          setVerifyingOPay(false);
-          setError('No OPay account found for this number.');
-          setLoading(false);
-        }
-      } catch (innerErr: any) {
-        console.error('OPay Verification Error:', innerErr);
-        // Fallback: Let them in even if DB fails, as long as OTP was valid
-        onAuthSuccess({ 
-          id: user.id, 
-          name: 'Hustler', 
-          role: role,
-          phone: user.phone || phoneNumber 
-        });
-      } finally {
-        setVerifyingOPay(false);
+      if (userData) {
+        // User exists, log them in
+        clearTimeout(safetyTimeout);
+        await logActivity('user_login', { userId: user.id, role: userData.role }, user.id);
+        onAuthSuccess(userData);
+      } else {
+        // New user, need to complete profile
+        clearTimeout(safetyTimeout);
         setLoading(false);
+        setNeedsProfile(true);
       }
     } catch (err: any) {
+      clearTimeout(safetyTimeout);
       console.error('OTP Verify Error:', err);
       setError(err.message || 'Invalid code. Try again.');
+      await logActivity('otp_verify_failed', { phone: phoneNumber, error: err.message });
+      setLoading(false);
+    }
+  };
+
+  const handleCompleteProfile = async () => {
+    if (!tempUser || !fullName) return setError('Please enter your full name');
+    setLoading(true);
+    setError('');
+
+    try {
+      // Simulate OPay verification (optional/simulated)
+      setVerifyingOPay(true);
+      await new Promise(resolve => setTimeout(resolve, 1500)); // Simulate delay
+      
+      const opayProfile = {
+        fullName: fullName,
+        accountLevel: 'Tier 1',
+        kycVerified: true,
+        opayAccountNumber: (tempUser.phone || phoneNumber).replace('+', ''),
+      };
+
+      const newUserData = {
+        id: tempUser.id,
+        name: fullName,
+        phone: tempUser.phone || phoneNumber,
+        role: role,
+        status: 'online',
+        is_verified: false,
+        has_opay: true,
+        opay_data: opayProfile,
+        created_at: new Date().toISOString(),
+      };
+      
+      const { data: insertedData, error: insertError } = await supabase
+        .from('users')
+        .insert([newUserData])
+        .select()
+        .maybeSingle();
+      
+      if (insertError) {
+        console.warn('Database insert failed, proceeding with local state:', insertError);
+        await logActivity('user_registration_db_failed', { userId: tempUser.id, error: insertError.message }, tempUser.id);
+        onAuthSuccess(newUserData);
+      } else {
+        await logActivity('user_registered', { userId: tempUser.id, role }, tempUser.id);
+        onAuthSuccess(insertedData || newUserData);
+      }
+    } catch (err: any) {
+      console.error('Profile Completion Error:', err);
+      setError(err.message || 'Failed to complete profile');
+    } finally {
+      setVerifyingOPay(false);
       setLoading(false);
     }
   };
@@ -167,7 +199,10 @@ export default function Auth({ onAuthSuccess }: { onAuthSuccess: (user: any) => 
         animate={{ opacity: 1, scale: 1 }}
         className="relative z-10 w-full max-w-md rounded-3xl border border-carbon bg-white/5 p-10 backdrop-blur-xl"
       >
-        <div className="mb-10 flex flex-col items-center gap-4">
+        <button 
+          onClick={onLogoClick}
+          className="mb-10 flex w-full flex-col items-center gap-4 transition-transform hover:scale-105 active:scale-95"
+        >
           <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-rush-orange font-display text-3xl font-extrabold text-midnight tracking-tighter">
             R<ArrowUpRight className="h-6 w-6 -ml-1" />
           </div>
@@ -179,7 +214,7 @@ export default function Auth({ onAuthSuccess }: { onAuthSuccess: (user: any) => 
               Lagos delivery for hustlers. <span className="italic">No dulling!</span>
             </p>
           </div>
-        </div>
+        </button>
 
         <AnimatePresence mode="wait">
           {verifyingOPay ? (
@@ -196,7 +231,76 @@ export default function Auth({ onAuthSuccess }: { onAuthSuccess: (user: any) => 
                 </div>
               </div>
               <h2 className="font-display text-xl font-bold text-cream uppercase tracking-widest">Verifying OPay</h2>
-              <p className="mt-2 text-xs text-white/40">Checking if your number has an active OPay account...</p>
+              <p className="mt-2 text-xs text-white/40">Securing your account with OPay verification...</p>
+            </motion.div>
+          ) : needsProfile ? (
+            <motion.div
+              key="profile-completion"
+              initial={{ opacity: 0, x: -20 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: 20 }}
+              className="space-y-6"
+            >
+              <div className="text-center">
+                <h2 className="text-sm font-bold text-cream uppercase tracking-widest">Complete Profile</h2>
+                <p className="mt-1 text-xs text-white/40">Welcome to RushNG! Tell us your name.</p>
+              </div>
+
+              <div className="space-y-4">
+                <div className="relative">
+                  <UserIcon className="absolute top-4 left-4 h-5 w-5 text-white/20" />
+                  <input
+                    type="text"
+                    placeholder="Full Name"
+                    value={fullName}
+                    onChange={(e) => setFullName(e.target.value)}
+                    className="w-full rounded-xl border border-carbon bg-white/5 py-4 pr-4 pl-12 text-sm text-cream placeholder:text-white/20 focus:border-rush-orange focus:outline-none"
+                  />
+                </div>
+                
+                <div className="grid grid-cols-3 gap-2 rounded-xl bg-carbon p-1">
+                  <button
+                    onClick={() => setRole('buyer')}
+                    className={`rounded-lg py-3 font-display text-[10px] font-bold transition-all ${
+                      role === 'buyer' ? 'bg-rush-orange text-midnight' : 'text-white/40 hover:text-white/60'
+                    }`}
+                  >
+                    BUYER
+                  </button>
+                  <button
+                    onClick={() => setRole('seller')}
+                    className={`rounded-lg py-3 font-display text-[10px] font-bold transition-all ${
+                      role === 'seller' ? 'bg-rush-orange text-midnight' : 'text-white/40 hover:text-white/60'
+                    }`}
+                  >
+                    SELLER
+                  </button>
+                  <button
+                    onClick={() => setRole('rider')}
+                    className={`rounded-lg py-3 font-display text-[10px] font-bold transition-all ${
+                      role === 'rider' ? 'bg-rush-orange text-midnight' : 'text-white/40 hover:text-white/60'
+                    }`}
+                  >
+                    RIDER
+                  </button>
+                </div>
+
+                {error && <p className="text-center text-xs font-bold text-red-500 uppercase tracking-widest">{error}</p>}
+                
+                <button
+                  onClick={handleCompleteProfile}
+                  disabled={loading || !fullName}
+                  className="flex w-full items-center justify-center gap-3 rounded-xl bg-rush-orange py-4 font-display text-sm font-bold tracking-wider text-midnight transition-transform hover:scale-[1.02] active:scale-[0.98] disabled:opacity-50"
+                >
+                  {loading ? (
+                    <div className="h-5 w-5 animate-spin rounded-full border-2 border-midnight border-t-transparent" />
+                  ) : (
+                    <>
+                      COMPLETE REGISTRATION <ArrowRight className="h-4 w-4" />
+                    </>
+                  )}
+                </button>
+              </div>
             </motion.div>
           ) : !otpSent ? (
             <motion.div
@@ -206,22 +310,30 @@ export default function Auth({ onAuthSuccess }: { onAuthSuccess: (user: any) => 
               exit={{ opacity: 0, x: 20 }}
               className="space-y-6"
             >
-              <div className="grid grid-cols-2 gap-2 rounded-xl bg-carbon p-1">
+              <div className="grid grid-cols-3 gap-2 rounded-xl bg-carbon p-1">
+                <button
+                  onClick={() => setRole('buyer')}
+                  className={`rounded-lg py-3 font-display text-[10px] font-bold transition-all ${
+                    role === 'buyer' ? 'bg-rush-orange text-midnight' : 'text-white/40 hover:text-white/60'
+                  }`}
+                >
+                  BUYER
+                </button>
                 <button
                   onClick={() => setRole('seller')}
-                  className={`rounded-lg py-3 font-display text-sm font-bold transition-all ${
+                  className={`rounded-lg py-3 font-display text-[10px] font-bold transition-all ${
                     role === 'seller' ? 'bg-rush-orange text-midnight' : 'text-white/40 hover:text-white/60'
                   }`}
                 >
-                  I'M A SELLER
+                  SELLER
                 </button>
                 <button
                   onClick={() => setRole('rider')}
-                  className={`rounded-lg py-3 font-display text-sm font-bold transition-all ${
+                  className={`rounded-lg py-3 font-display text-[10px] font-bold transition-all ${
                     role === 'rider' ? 'bg-rush-orange text-midnight' : 'text-white/40 hover:text-white/60'
                   }`}
                 >
-                  I'M A RIDER
+                  RIDER
                 </button>
               </div>
 
@@ -230,7 +342,7 @@ export default function Auth({ onAuthSuccess }: { onAuthSuccess: (user: any) => 
                   <Phone className="absolute top-4 left-4 h-5 w-5 text-white/20" />
                   <input
                     type="tel"
-                    placeholder="Phone Number (e.g. 080...)"
+                    placeholder="WhatsApp Number (e.g. 080...)"
                     value={phoneNumber}
                     onChange={(e) => setPhoneNumber(e.target.value)}
                     className="w-full rounded-xl border border-carbon bg-white/5 py-4 pr-4 pl-12 text-sm text-cream placeholder:text-white/20 focus:border-rush-orange focus:outline-none"
@@ -260,7 +372,7 @@ export default function Auth({ onAuthSuccess }: { onAuthSuccess: (user: any) => 
                     <div className="h-5 w-5 animate-spin rounded-full border-2 border-midnight border-t-transparent" />
                   ) : (
                     <>
-                      SEND OTP <ArrowRight className="h-4 w-4" />
+                      SEND CODE <ArrowRight className="h-4 w-4" />
                     </>
                   )}
                 </button>
@@ -275,7 +387,7 @@ export default function Auth({ onAuthSuccess }: { onAuthSuccess: (user: any) => 
               className="space-y-6"
             >
               <div className="text-center">
-                <h2 className="text-sm font-bold text-cream uppercase tracking-widest">Verify Number</h2>
+                <h2 className="text-sm font-bold text-cream uppercase tracking-widest">Verify WhatsApp</h2>
                 <p className="mt-1 text-xs text-white/40">Enter the 6-digit code sent to {phoneNumber}</p>
               </div>
 

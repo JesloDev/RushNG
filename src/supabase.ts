@@ -1,13 +1,16 @@
 import { createClient } from '@supabase/supabase-js';
 
-const supabaseUrl = process.env.VITE_SUPABASE_URL;
-const supabaseAnonKey = process.env.VITE_SUPABASE_ANON_KEY;
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
 if (!supabaseUrl || !supabaseAnonKey) {
-  console.error('Missing Supabase environment variables. Check your .env file or AI Studio Secrets.');
+  console.warn('Missing Supabase environment variables. Please set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in your settings.');
 }
 
-// Only create client if we have a valid URL to avoid the "Invalid supabaseUrl" error
-export const supabase = (supabaseUrl && supabaseUrl.startsWith('http')) 
-  ? createClient(supabaseUrl, supabaseAnonKey || '')
+// Ensure we have a valid URL and key before creating the client
+export const supabase = (supabaseUrl && supabaseAnonKey) 
+  ? createClient(supabaseUrl, supabaseAnonKey)
   : null as any;
+
+// Helper to check if supabase is configured
+export const isSupabaseConfigured = () => !!supabaseUrl && !!supabaseAnonKey;

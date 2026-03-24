@@ -1,400 +1,325 @@
 import { useState, useEffect } from 'react';
 import { supabase } from '../supabase';
+import { logActivity } from '../services/logger';
 import { motion, AnimatePresence } from 'motion/react';
-import { GoogleGenAI } from "@google/genai";
-import { MapPin, Check, Navigation, Package, Bike, Map as MapIcon, List, Volume2 } from 'lucide-react';
+import { MapPin, Check, Navigation, Package, Bike, List, Volume2, Loader2, Clock } from 'lucide-react';
 import LeafletMap from './Map';
 
 export default function RiderDashboard({ user }: { user: any }) {
-  const [orders, setOrders] = useState<any[]>([]);
-  const [activeOrder, setActiveOrder] = useState<any | null>(null);
+  const [availableOrders, setAvailableOrders] = useState<any[]>([]);
+  const [myOrders, setMyOrders] = useState<any[]>([]);
+  const [activeTab, setActiveTab] = useState<'quests' | 'my'>('quests');
   const [view, setView] = useState<'list' | 'map'>('list');
-  const [verifying, setVerifying] = useState(false);
-  const [verificationSuccess, setVerificationSuccess] = useState(false);
-  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [isPidgin, setIsPidgin] = useState(false);
 
   const t = (en: string, pid: string) => isPidgin ? pid : en;
 
-  const speak = async (text: string) => {
-    try {
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-      const response = await ai.models.generateContent({
-        model: "gemini-2.5-flash-preview-tts",
-        contents: [{ parts: [{ text: `Say this in a friendly Nigerian Pidgin voice: ${text}` }] }],
-        config: {
-          responseModalities: ["AUDIO"],
-          speechConfig: {
-            voiceConfig: {
-              prebuiltVoiceConfig: { voiceName: 'Kore' },
-            },
-          },
-        },
-      });
-
-      const part = response.candidates?.[0]?.content?.parts?.[0];
-      const base64Audio = part?.inlineData?.data;
-      const mimeType = part?.inlineData?.mimeType || 'audio/wav';
-      
-      if (base64Audio) {
-        const audio = new Audio(`data:${mimeType};base64,${base64Audio}`);
-        audio.play();
-      }
-    } catch (err) {
-      console.error('TTS error:', err);
-    }
-  };
-
   useEffect(() => {
-    const fetchPendingOrders = async () => {
-      const { data, error } = await supabase
+    if (!user?.id) return;
+
+    const fetchOrders = async () => {
+      // Fetch available orders
+      const { data: available, error: availError } = await supabase
         .from('orders')
         .select('*')
         .eq('status', 'pending')
         .order('created_at', { ascending: false });
       
-      if (data) setOrders(data);
-      if (error) console.error('Fetch pending error:', error);
-    };
+      if (available) setAvailableOrders(available);
+      if (availError) console.error('Fetch available error:', availError);
 
-    const fetchActiveOrder = async () => {
-      const { data, error } = await supabase
+      // Fetch my active orders
+      const { data: mine, error: mineError } = await supabase
         .from('orders')
         .select('*')
-        .eq('riderId', user.id)
-        .in('status', ['accepted', 'picked_up'])
-        .maybeSingle();
+        .eq('rider_id', user.id)
+        .in('status', ['accepted', 'picked_up', 'delivered', 'collected'])
+        .neq('status', 'completed')
+        .order('created_at', { ascending: false });
       
-      if (data) setActiveOrder(data);
-      else setActiveOrder(null);
-      if (error) console.error('Fetch active error:', error);
+      if (mine) setMyOrders(mine);
+      if (mineError) console.error('Fetch mine error:', mineError);
     };
 
-    fetchPendingOrders();
-    fetchActiveOrder();
+    fetchOrders();
 
-    // Set up real-time subscription
     const channel = supabase
-      .channel('rider-updates')
+      .channel('rider-orders')
       .on('postgres_changes', { 
         event: '*', 
         schema: 'public', 
-        table: 'orders' 
+        table: 'orders'
       }, () => {
-        fetchPendingOrders();
-        fetchActiveOrder();
+        fetchOrders();
       })
       .subscribe();
 
     // Location tracking
     let locationInterval: any;
-    if (activeOrder) {
+    if (myOrders.length > 0) {
       locationInterval = setInterval(() => {
         if (navigator.geolocation) {
           navigator.geolocation.getCurrentPosition((position) => {
             const { latitude, longitude } = position.coords;
-            supabase
-              .from('orders')
-              .update({ riderLocation: { lat: latitude, lng: longitude } })
-              .eq('id', activeOrder.id)
-              .then(({ error }) => {
-                if (error) console.error('Location update error:', error);
-              });
+            myOrders.forEach(order => {
+              if (order.status !== 'completed') {
+                supabase
+                  .from('orders')
+                  .update({ rider_location: { lat: latitude, lng: longitude } })
+                  .eq('id', order.id)
+                  .then(({ error }) => {
+                    if (error) console.error('Location update error:', error);
+                  });
+              }
+            });
           });
         }
-      }, 10000); // Every 10 seconds
+      }, 10000);
     }
 
     return () => {
       supabase.removeChannel(channel);
       if (locationInterval) clearInterval(locationInterval);
     };
-  }, [user.id, activeOrder?.id]);
+  }, [user.id, myOrders.length]);
 
-  const acceptOrder = async (id: string) => {
+  const acceptOrder = async (orderId: string) => {
+    if (myOrders.length >= 3) {
+      setError(t('You can only have 3 active deliveries at a time.', 'You fit only carry 3 load at once. Finish the ones you get first!'));
+      return;
+    }
+
+    setLoading(true);
     try {
-      const { error: updateError } = await supabase
+      // Use a conditional update to ensure first-come-first-served
+      const { data, error } = await supabase
         .from('orders')
-        .update({
-          rider_id: user.id,
-          status: 'accepted',
+        .update({ 
+          rider_id: user.id, 
+          status: 'accepted' 
         })
-        .eq('id', id);
+        .eq('id', orderId)
+        .eq('status', 'pending')
+        .select();
       
-      if (updateError) throw updateError;
+      if (error) throw error;
+      if (!data || data.length === 0) {
+        throw new Error(t('Someone else already accepted this order.', 'Another rider don carry this one. Sharp sharp!'));
+      }
+
+      await logActivity('order_accepted_by_rider', { orderId }, user.id);
     } catch (err: any) {
       console.error('Accept error:', err);
-      setError(err.message || 'Failed to accept order. Try again.');
+      setError(err.message || 'Failed to accept order.');
+      await logActivity('order_acceptance_failed_by_rider', { orderId, error: err.message }, user.id);
+    } finally {
+      setLoading(false);
     }
   };
 
-  const updateStatus = async (id: string, newStatus: string) => {
+  const confirmDelivery = async (orderId: string) => {
     try {
-      const { error: updateError } = await supabase
-        .from('orders')
-        .update({ status: newStatus })
-        .eq('id', id);
+      const { data: order } = await supabase.from('orders').select('buyer_confirmed').eq('id', orderId).single();
       
-      if (updateError) throw updateError;
-    } catch (err: any) {
-      console.error('Update status error:', err);
-      setError(err.message || 'Failed to update status. Try again.');
-    }
-  };
-
-  const handleVerify = async () => {
-    setVerifying(true);
-    // Simulate a verification process
-    setTimeout(async () => {
-      try {
-        const { error } = await supabase
-          .from('users')
-          .update({ is_verified: true })
-          .eq('id', user.id);
-        
-        if (error) throw error;
-        setVerificationSuccess(true);
-      } catch (error) {
-        console.error('Verification error:', error);
-        setError('Verification failed. Try again later.');
-      } finally {
-        setVerifying(false);
+      const updateData: any = { rider_confirmed: true };
+      if (order?.buyer_confirmed) {
+        updateData.status = 'completed';
+      } else {
+        updateData.status = 'delivered';
       }
-    }, 1000);
+
+      const { error } = await supabase.from('orders').update(updateData).eq('id', orderId);
+      if (error) throw error;
+
+      await logActivity('order_delivered_by_rider', { orderId, status: updateData.status }, user.id);
+    } catch (err: any) {
+      console.error('Confirm error:', err);
+      setError(err.message || 'Failed to confirm delivery.');
+      await logActivity('order_delivery_failed_by_rider', { orderId, error: err.message }, user.id);
+    }
   };
 
   return (
-    <div className="flex h-screen flex-col bg-midnight">
-      {/* Header */}
-      <div className="flex items-center justify-between border-b border-carbon bg-midnight/80 p-6 backdrop-blur-xl">
-        <div className="flex items-center gap-3">
-          <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-rush-orange font-display text-lg font-extrabold text-midnight">
-            R
+    <div className="flex h-screen flex-col bg-midnight md:flex-row">
+      {/* Sidebar */}
+      <div className="z-20 flex w-full flex-col border-b border-carbon bg-midnight/80 backdrop-blur-xl md:w-[400px] md:border-b-0 md:border-r">
+        <div className="flex items-center justify-between border-b border-carbon p-6">
+          <div className="flex gap-4">
+            <button
+              onClick={() => setActiveTab('quests')}
+              className={`font-display text-xs font-bold tracking-widest uppercase transition-all ${
+                activeTab === 'quests' ? 'text-rush-orange' : 'text-white/20 hover:text-white/40'
+              }`}
+            >
+              {t('QUESTS', 'LOADS')}
+            </button>
+            <button
+              onClick={() => setActiveTab('my')}
+              className={`font-display text-xs font-bold tracking-widest uppercase transition-all ${
+                activeTab === 'my' ? 'text-rush-orange' : 'text-white/20 hover:text-white/40'
+              }`}
+            >
+              {t('MY LOAD', 'MY WAY')}
+            </button>
           </div>
-          <h2 className="font-display text-xl font-extrabold text-cream">{t('Rider Hub', 'Rider Hub')}</h2>
-          {user.opayData?.kycVerified && (
-            <div className="flex items-center gap-1 rounded-full bg-green-500/10 px-2 py-0.5 text-[8px] font-black text-green-500 uppercase tracking-widest">
-              <Check className="h-2 w-2" />
-              OPay {user.opayData.accountLevel}
-            </div>
-          )}
           <button 
             onClick={() => setIsPidgin(!isPidgin)}
-            className="rounded-full border border-rush-orange/30 bg-rush-orange/10 px-3 py-1 text-[8px] font-black text-rush-orange uppercase tracking-widest transition-all hover:bg-rush-orange hover:text-midnight"
+            className="rounded-full border border-rush-orange/30 bg-rush-orange/10 px-3 py-1 text-[10px] font-black text-rush-orange uppercase tracking-widest"
           >
             {isPidgin ? 'ENGLISH' : 'PIDGIN'}
           </button>
-          <span className="text-[10px] font-bold tracking-widest text-white/20 uppercase">{t('Oya, make we deliver!', 'Oya, make we deliver!')}</span>
         </div>
-        <div className="flex gap-2 rounded-xl bg-carbon p-1">
-          {!user.isVerified && (
-            <button
-              onClick={handleVerify}
-              disabled={verifying}
-              className="mr-4 rounded-lg bg-lagos-gold/10 px-4 py-2 text-[10px] font-black uppercase tracking-widest text-lagos-gold transition-all hover:bg-lagos-gold hover:text-midnight disabled:opacity-50"
-            >
-              {verifying ? 'VERIFYING...' : 'VERIFY ACCOUNT'}
-            </button>
-          )}
-          {user.isVerified && (
-            <div className="mr-4 flex items-center gap-2 rounded-lg bg-green-500/10 px-4 py-2 text-[10px] font-black uppercase tracking-widest text-green-500">
-              <Check className="h-3 w-3" />
-              VERIFIED
+
+        <div className="flex-1 overflow-y-auto p-6">
+          {error && (
+            <div className="mb-6 rounded-xl border border-red-500/20 bg-red-500/10 p-4 text-xs font-bold text-red-500 uppercase tracking-widest">
+              {error}
+              <button onClick={() => setError(null)} className="ml-2 underline">DISMISS</button>
             </div>
           )}
-          <button
-            onClick={() => setView('list')}
-            className={`rounded-lg p-2 transition-all ${view === 'list' ? 'bg-rush-orange text-midnight' : 'text-white/40'}`}
-          >
-            <List className="h-5 w-5" />
-          </button>
-          <button
-            onClick={() => setView('map')}
-            className={`rounded-lg p-2 transition-all ${view === 'map' ? 'bg-rush-orange text-midnight' : 'text-white/40'}`}
-          >
-            <MapIcon className="h-5 w-5" />
-          </button>
+
+          <AnimatePresence mode="wait">
+            {activeTab === 'my' && (
+              <motion.div
+                key="my"
+                initial={{ opacity: 0, x: -20 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: 20 }}
+                className="space-y-4"
+              >
+                <h3 className="font-display text-xl font-extrabold text-cream">{t('My Deliveries', 'My Load')} ({myOrders.length}/3)</h3>
+                <div className="space-y-4">
+                  {myOrders.length === 0 ? (
+                    <p className="text-sm text-white/20 italic">{t('No active deliveries.', 'You never carry any load.')}</p>
+                  ) : (
+                    myOrders.map(order => (
+                      <div key={order.id} className="rounded-2xl border border-rush-orange/30 bg-rush-orange/[0.03] p-4">
+                        <div className="flex items-center justify-between mb-3">
+                          <span className="text-[10px] font-black text-rush-orange uppercase tracking-widest">{order.status}</span>
+                          <span className="text-[10px] text-white/20">{new Date(order.created_at).toLocaleTimeString()}</span>
+                        </div>
+                        <h4 className="font-bold text-cream">{order.product_name}</h4>
+                        <div className="mt-2 space-y-2">
+                          <div className="flex items-center gap-2 text-[10px] text-white/40">
+                            <MapPin className="h-3 w-3" />
+                            <span className="truncate">Pickup: {order.pickup.address}</span>
+                          </div>
+                          <div className="flex items-center gap-2 text-[10px] text-white/40">
+                            <Navigation className="h-3 w-3" />
+                            <span className="truncate">Drop-off: {order.dropoff.address}</span>
+                          </div>
+                        </div>
+                        
+                        {!order.rider_confirmed && (
+                          <button
+                            onClick={() => confirmDelivery(order.id)}
+                            className="mt-4 w-full rounded-xl bg-rush-orange py-2 text-xs font-bold text-midnight"
+                          >
+                            {t('MARK AS DELIVERED', 'I DON DELIVER AM')}
+                          </button>
+                        )}
+                        {order.rider_confirmed && !order.buyer_confirmed && (
+                          <p className="mt-4 text-[10px] text-center italic text-white/20">
+                            {t('Waiting for customer to confirm...', 'Wait for customer to confirm...')}
+                          </p>
+                        )}
+                      </div>
+                    ))
+                  )}
+                </div>
+              </motion.div>
+            )}
+
+            {activeTab === 'quests' && (
+              <motion.div
+                key="quests"
+                initial={{ opacity: 0, x: -20 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: 20 }}
+                className="space-y-4"
+              >
+                <h3 className="font-display text-xl font-extrabold text-cream">{t('Available Quests', 'Load wey dey ground')}</h3>
+                <div className="space-y-4">
+                  {availableOrders.length === 0 ? (
+                    <p className="text-sm text-white/20 italic">{t('No available quests.', 'No load dey ground now.')}</p>
+                  ) : (
+                    availableOrders.map(order => (
+                      <div key={order.id} className="rounded-2xl border border-carbon bg-white/5 p-4">
+                        <div className="flex items-center justify-between mb-3">
+                          <span className="font-display text-lg font-black text-rush-orange">₦{order.fare.toLocaleString()}</span>
+                          <span className="text-[10px] text-white/20">{new Date(order.created_at).toLocaleTimeString()}</span>
+                        </div>
+                        <h4 className="font-bold text-cream">{order.product_name}</h4>
+                        <div className="mt-2 space-y-2">
+                          <div className="flex items-center gap-2 text-[10px] text-white/40">
+                            <MapPin className="h-3 w-3" />
+                            <span className="truncate">Pickup: {order.pickup.address}</span>
+                          </div>
+                          <div className="flex items-center gap-2 text-[10px] text-white/40">
+                            <Navigation className="h-3 w-3" />
+                            <span className="truncate">Drop-off: {order.dropoff.address}</span>
+                          </div>
+                        </div>
+                        <button
+                          disabled={loading || myOrders.length >= 3}
+                          onClick={() => acceptOrder(order.id)}
+                          className="mt-4 w-full rounded-xl bg-white/10 py-2 text-xs font-bold text-cream hover:bg-rush-orange hover:text-midnight disabled:opacity-50"
+                        >
+                          {loading ? <Loader2 className="mx-auto h-4 w-4 animate-spin" /> : t('ACCEPT QUEST', 'I GO CARRY AM')}
+                        </button>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
         </div>
       </div>
 
-      <div className="flex-1 overflow-hidden relative">
-        {error && (
-          <motion.div 
-            initial={{ opacity: 0, y: -10 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="absolute top-4 left-6 right-6 z-50 rounded-xl border border-red-500/20 bg-red-500/10 p-4"
-          >
-            <div className="flex items-center justify-between">
-              <p className="text-xs font-bold text-red-500 uppercase tracking-widest">{error}</p>
-              <button onClick={() => setError('')} className="text-red-500 hover:text-red-400">
-                <Check className="h-4 w-4" />
-              </button>
-            </div>
-          </motion.div>
-        )}
-        {verificationSuccess && (
-          <motion.div 
-            initial={{ opacity: 0, y: -10 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="absolute top-4 left-6 right-6 z-50 rounded-xl border border-green-500/20 bg-green-500/10 p-4"
-          >
-            <div className="flex items-center justify-between">
-              <p className="text-xs font-bold text-green-500 uppercase tracking-widest">Account verified successfully! 🚀</p>
-              <button onClick={() => setVerificationSuccess(false)} className="text-green-500 hover:text-green-400">
-                <Check className="h-4 w-4" />
-              </button>
-            </div>
-          </motion.div>
-        )}
-        <AnimatePresence mode="wait">
-          {view === 'list' ? (
-            <motion.div
-              key="list"
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -20 }}
-              className="h-full overflow-y-auto p-6"
-            >
-              {activeOrder ? (
-                <div className="mb-12 space-y-6">
-                  <h3 className="text-xs font-bold tracking-[0.2em] text-rush-orange uppercase">Active Delivery</h3>
-                  <div className="rounded-3xl border border-rush-orange/30 bg-rush-orange/[0.03] p-8">
-                    <div className="mb-6 flex items-center justify-between">
-                      <div className="flex items-center gap-3">
-                        <Bike className="h-6 w-6 text-rush-orange" />
-                        <span className="font-display text-xl font-bold text-cream">Order #{activeOrder.id.slice(0, 5)}</span>
-                      </div>
-                      <span className="rounded-full bg-rush-orange px-3 py-1 text-[10px] font-black uppercase tracking-widest text-midnight">
-                        {activeOrder.status === 'accepted' ? 'Oya, go pick am!' : 'On the way!'}
-                      </span>
-                    </div>
-                    
-                    <div className="space-y-6">
-                      <div className="flex gap-4">
-                        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-carbon text-rush-orange">
-                          <MapPin className="h-5 w-5" />
-                        </div>
-                        <div>
-                          <p className="text-xs font-bold tracking-widest text-white/20 uppercase">Pickup</p>
-                          <p className="text-sm text-cream">{activeOrder.pickup.address}</p>
-                        </div>
-                      </div>
-                      <div className="flex gap-4">
-                        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-carbon text-lagos-gold">
-                          <Navigation className="h-5 w-5" />
-                        </div>
-                        <div>
-                          <p className="text-xs font-bold tracking-widest text-white/20 uppercase">Drop-off</p>
-                          <p className="text-sm text-cream">{activeOrder.dropoff.address}</p>
-                        </div>
-                      </div>
-                      <div className="flex gap-4">
-                        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-carbon text-green-500">
-                          <Package className="h-5 w-5" />
-                        </div>
-                        <div>
-                          <p className="text-xs font-bold tracking-widest text-white/20 uppercase">Payment Method</p>
-                          <p className="text-sm font-bold text-cream uppercase">{activeOrder.paymentMethod}</p>
-                        </div>
-                      </div>
-                    </div>
+      {/* Map */}
+      <div className="relative flex-1 bg-carbon">
+        <LeafletMap 
+          markers={[
+            ...availableOrders.map(o => ({
+              id: o.id,
+              position: o.pickup,
+              title: `₦${o.fare}`,
+              color: '#FF5C1A'
+            })),
+            ...myOrders.map(o => ({
+              id: `my-${o.id}`,
+              position: o.dropoff,
+              title: 'Drop-off',
+              color: '#34A853'
+            }))
+          ]}
+          onMarkerClick={(id) => acceptOrder(id)}
+        />
+      </div>
 
-                    <div className="mt-8 flex gap-3">
-                      {activeOrder.status === 'accepted' && (
-                        <button
-                          onClick={() => updateStatus(activeOrder.id, 'picked_up')}
-                          className="w-full rounded-xl bg-rush-orange py-4 font-display text-sm font-bold text-midnight uppercase tracking-widest"
-                        >
-                          I'VE PICKED UP 📦
-                        </button>
-                      )}
-                      {activeOrder.status === 'picked_up' && (
-                        <button
-                          onClick={() => updateStatus(activeOrder.id, 'delivered')}
-                          className="w-full rounded-xl bg-green-500 py-4 font-display text-sm font-bold text-midnight uppercase tracking-widest"
-                        >
-                          DELIVERED! ✅
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              ) : (
-                <div className="space-y-6">
-                  <div className="flex items-center justify-between">
-                    <h3 className="text-xs font-bold tracking-[0.2em] text-white/20 uppercase">{t('Pending Pickups', 'Load wey dey wait')}</h3>
-                    <button 
-                      onClick={() => speak(t('Here are the orders available for delivery. Tap one to see details.', 'Look all the load wey dey ground for delivery. Touch any one to see more.'))}
-                      className="rounded-full p-2 text-rush-orange hover:bg-rush-orange/10"
-                    >
-                      <Volume2 className="h-4 w-4" />
-                    </button>
-                  </div>
-                  {orders.length === 0 && (
-                    <div className="flex flex-col items-center justify-center py-20 text-center">
-                      <div className="mb-4 text-4xl">😴</div>
-                      <p className="text-sm text-white/20">{t('No orders available right now. Lagos is quiet.', 'No load dey ground now. Lagos quiet.')}</p>
-                      <p className="mt-2 text-[10px] text-white/10 italic">{t('Wait small, money go come.', 'Wait small, money go come.')}</p>
-                    </div>
-                  )}
-                  <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                    {orders.map(order => (
-                      <motion.div
-                        key={order.id}
-                        initial={{ opacity: 0, scale: 0.95 }}
-                        animate={{ opacity: 1, scale: 1 }}
-                        className="rounded-2xl border border-carbon bg-white/5 p-6"
-                      >
-                        <div className="mb-6 flex items-center justify-between">
-                          <span className="font-display text-2xl font-extrabold text-rush-orange">₦{order.fare}</span>
-                          <span className="text-xs text-white/20">{new Date(order.createdAt).toLocaleTimeString()}</span>
-                        </div>
-                        <div className="mb-6 space-y-3">
-                          <div className="flex items-center gap-2 text-xs text-white/40">
-                            <MapPin className="h-3 w-3" />
-                            <span className="truncate">{order.pickup.address}</span>
-                          </div>
-                          <div className="flex items-center gap-2 text-xs text-white/40">
-                            <Navigation className="h-3 w-3" />
-                            <span className="truncate">{order.dropoff.address}</span>
-                          </div>
-                          <div className="flex items-center gap-2 text-[10px] font-bold text-rush-orange/60 uppercase">
-                            <Package className="h-3 w-3" />
-                            <span>{order.paymentMethod}</span>
-                          </div>
-                        </div>
-                        <button
-                          onClick={() => acceptOrder(order.id)}
-                          className="w-full rounded-xl bg-white/5 py-3 font-display text-xs font-bold text-cream transition-colors hover:bg-rush-orange hover:text-midnight"
-                        >
-                          ACCEPT PICKUP
-                        </button>
-                      </motion.div>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </motion.div>
-          ) : (
-            <motion.div
-              key="map"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              className="h-full"
-            >
-              <LeafletMap 
-                markers={orders.map(o => ({
-                  id: o.id,
-                  position: o.pickup,
-                  title: `₦${o.fare}`,
-                  color: '#FF5C1A'
-                }))}
-                onMarkerClick={(id) => acceptOrder(id)}
-              />
-            </motion.div>
-          )}
-        </AnimatePresence>
+      {/* Mobile Bottom Nav */}
+      <div className="fixed bottom-0 left-0 right-0 z-50 flex items-center justify-around border-t border-carbon bg-midnight/80 px-6 py-3 backdrop-blur-xl md:hidden">
+        <button
+          onClick={() => setActiveTab('quests')}
+          className={`flex flex-col items-center gap-1 transition-all ${
+            activeTab === 'quests' ? 'text-rush-orange' : 'text-white/20'
+          }`}
+        >
+          <List className="h-5 w-5" />
+          <span className="text-[8px] font-bold uppercase tracking-widest">{t('QUESTS', 'LOADS')}</span>
+        </button>
+        <button
+          onClick={() => setActiveTab('my')}
+          className={`flex flex-col items-center gap-1 transition-all ${
+            activeTab === 'my' ? 'text-rush-orange' : 'text-white/20'
+          }`}
+        >
+          <Bike className="h-5 w-5" />
+          <span className="text-[8px] font-bold uppercase tracking-widest">{t('MY LOAD', 'MY WAY')}</span>
+        </button>
       </div>
     </div>
   );

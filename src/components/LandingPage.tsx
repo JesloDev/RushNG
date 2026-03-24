@@ -1,11 +1,64 @@
 import { motion } from 'motion/react';
-import { ArrowUpRight, Bike, ShoppingBag, ShieldCheck, MapPin, Volume2, ArrowRight } from 'lucide-react';
+import { ArrowUpRight, Bike, ShoppingBag, ShieldCheck, MapPin, Volume2, ArrowRight, Loader2 } from 'lucide-react';
+import { useState, FormEvent } from 'react';
+import { supabase } from '../supabase';
+import { logActivity } from '../services/logger';
 
 interface LandingPageProps {
   onGetStarted: () => void;
+  onAdminLogin: () => void;
 }
 
-export default function LandingPage({ onGetStarted }: LandingPageProps) {
+export default function LandingPage({ onGetStarted, onAdminLogin }: LandingPageProps) {
+  const [feedbackLoading, setFeedbackLoading] = useState(false);
+  const [feedbackSuccess, setFeedbackSuccess] = useState(false);
+
+  const handleFeedbackSubmit = async (e: FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    if (!supabase) return alert('Supabase not configured!');
+    
+    setFeedbackLoading(true);
+    const formData = new FormData(e.currentTarget);
+    const phoneInput = formData.get('phone') as string;
+    const message = formData.get('message') as string;
+
+    // Format phone number
+    let formattedPhone = phoneInput;
+    if (phoneInput.startsWith('0')) formattedPhone = '+234' + phoneInput.slice(1);
+    else if (!phoneInput.startsWith('+')) formattedPhone = '+234' + phoneInput;
+
+    try {
+      // Try to find a registered user with this phone number
+      const { data: userData } = await supabase
+        .from('users')
+        .select('id, name')
+        .eq('phone', formattedPhone)
+        .maybeSingle();
+
+      const feedback = {
+        name: userData?.name || 'Guest',
+        phone: formattedPhone,
+        message: message,
+        created_at: new Date().toISOString()
+      };
+
+      const { error } = await supabase.from('feedback').insert([feedback]);
+      if (error) throw error;
+      
+      await logActivity('feedback_submitted', { phone: formattedPhone, name: feedback.name }, userData?.id);
+      
+      setFeedbackSuccess(true);
+      (e.target as HTMLFormElement).reset();
+      setTimeout(() => setFeedbackSuccess(false), 5000);
+    } catch (error: any) {
+      console.error('Feedback error:', error);
+      alert('Something went wrong. Please try again.');
+      await logActivity('feedback_failed', { phone: formattedPhone, error: error.message });
+    } finally {
+      setFeedbackLoading(false);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-midnight text-cream selection:bg-rush-orange selection:text-midnight">
       {/* Hero Section */}
@@ -20,12 +73,15 @@ export default function LandingPage({ onGetStarted }: LandingPageProps) {
           transition={{ duration: 0.8 }}
           className="z-10"
         >
-          <div className="mb-6 flex items-center justify-center gap-3">
+          <button 
+            onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
+            className="mb-6 flex w-full items-center justify-center gap-3 transition-transform hover:scale-105 active:scale-95"
+          >
             <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-rush-orange font-display text-3xl font-black text-midnight shadow-[0_0_40px_rgba(255,92,26,0.3)] tracking-tighter">
               R<ArrowUpRight className="h-6 w-6 -ml-1" />
             </div>
             <span className="font-display text-4xl font-black tracking-tight text-cream">RushNG</span>
-          </div>
+          </button>
           
           <h1 className="max-w-4xl font-display text-5xl font-black leading-[1.1] tracking-tight md:text-8xl">
             DELIVERY WEY <span className="text-rush-orange italic">NO DEY DULL.</span>
@@ -151,15 +207,60 @@ export default function LandingPage({ onGetStarted }: LandingPageProps) {
         </div>
       </section>
 
+      {/* Feedback Section */}
+      <section className="border-t border-carbon bg-midnight/30 py-32">
+        <div className="mx-auto max-w-3xl px-6 text-center">
+          <h2 className="font-display text-4xl font-black mb-4 uppercase tracking-tight">Got Feedback?</h2>
+          <p className="text-white/40 mb-12">Help us make RushNG better for the streets of Lagos. Complaints or suggestions, we dey listen.</p>
+          
+          <form className="space-y-4 text-left" onSubmit={handleFeedbackSubmit}>
+            <div className="grid gap-4">
+              <input 
+                name="phone"
+                type="tel" 
+                placeholder="YOUR WHATSAPP NUMBER (080...)" 
+                required
+                className="w-full rounded-2xl border border-carbon bg-white/5 p-4 text-sm text-cream placeholder:text-white/20 focus:border-rush-orange focus:outline-none"
+              />
+            </div>
+            <textarea 
+              name="message"
+              placeholder="WETIN DEY SUP? (Your message...)" 
+              required
+              rows={4}
+              className="w-full rounded-2xl border border-carbon bg-white/5 p-4 text-sm text-cream placeholder:text-white/20 focus:border-rush-orange focus:outline-none"
+            />
+            <button 
+              type="submit"
+              disabled={feedbackLoading}
+              className="flex w-full items-center justify-center rounded-2xl bg-rush-orange py-4 font-display text-sm font-bold text-midnight transition-transform hover:scale-[1.02] active:scale-[0.98] disabled:opacity-50"
+            >
+              {feedbackLoading ? <Loader2 className="h-5 w-5 animate-spin" /> : feedbackSuccess ? 'FEEDBACK SENT! THANKS!' : 'SEND FEEDBACK'}
+            </button>
+          </form>
+        </div>
+      </section>
+
       {/* Footer */}
       <footer className="border-t border-carbon p-12 text-center">
-        <div className="flex items-center justify-center gap-3 opacity-50">
+        <button 
+          onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
+          className="flex w-full items-center justify-center gap-3 opacity-50 transition-all hover:opacity-100 active:scale-95"
+        >
           <div className="flex h-6 w-6 items-center justify-center rounded bg-rush-orange font-display text-[10px] font-black text-midnight">
             R
           </div>
           <span className="font-display text-sm font-bold tracking-widest uppercase">RushNG © 2026</span>
-        </div>
+        </button>
         <p className="mt-4 text-[10px] font-bold tracking-widest text-white/10 uppercase">Built for the streets of Lagos.</p>
+        
+        <button 
+          onClick={onAdminLogin}
+          className="mt-8 flex items-center gap-2 mx-auto rounded-full border border-white/5 bg-white/5 px-4 py-2 text-[10px] font-bold tracking-widest text-white/30 uppercase transition-all hover:border-rush-orange/50 hover:bg-rush-orange/10 hover:text-rush-orange"
+        >
+          <ShieldCheck className="h-3 w-3" />
+          Admin Portal
+        </button>
       </footer>
     </div>
   );
